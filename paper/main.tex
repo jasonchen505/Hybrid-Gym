@@ -1,0 +1,1025 @@
+
+\documentclass{article}
+
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs} %
+
+\usepackage{hyperref}
+
+
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+
+
+\usepackage[preprint]{icml2026}
+
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{amsthm}
+
+
+\usepackage[capitalize,noabbrev]{cleveref}
+\usepackage{color-edits}
+
+
+\addauthor{el}{purple}
+\addauthor{df}{cyan}
+
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\usepackage[textsize=tiny]{todonotes}
+
+\input{packages}
+
+\icmltitlerunning{\methodName: Training Coding Agents on Scalable Data to Generalize Across Tasks}
+
+\begin{document}
+
+\twocolumn[
+  \icmltitle{{\twemoji[height=2ex]{1f3a8}} \methodName: Training Coding Agents to Generalize Across Tasks}
+
+  \icmlsetsymbol{equal}{*}
+
+  \begin{icmlauthorlist}
+    \icmlauthor{Yiqing Xie}{cmu}
+    \icmlauthor{Emmy Liu}{cmu}
+    \icmlauthor{Gaokai Zhang}{cmu}
+    \icmlauthor{Nachiket Kotalwar}{cmu}
+    \icmlauthor{Shubham Gandhi}{cmu}
+    \icmlauthor{Sathwik Acharya}{cmu}
+    \icmlauthor{Xingyao Wang}{openhands}
+    \icmlauthor{Carolyn Rosé}{cmu}
+    \icmlauthor{Graham Neubig}{cmu,openhands}
+    \icmlauthor{Daniel Fried}{cmu}
+  \end{icmlauthorlist}
+
+  \icmlaffiliation{cmu}{Carnegie Mellon University}
+  \icmlaffiliation{openhands}{All Hands AI}
+
+  \icmlcorrespondingauthor{Daniel Fried}{dfried@cs.cmu.edu}
+  \icmlcorrespondingauthor{Yiqing Xie}{yiqingxi@cs.cmu.edu}
+
+  \icmlkeywords{coding agent, coding agent training, synthetic data}
+
+  \vskip 0.3in
+]
+
+
+
+\printAffiliationsAndNotice{}  %
+
+\begin{abstract}
+When assessing the quality of coding agents, predominant benchmarks focus on solving single issues on GitHub, such as SWE-Bench.
+In contrast, in real use these agents solve more various and complex tasks that involve other skills such as exploring codebases, testing software, and designing architecture.
+In this paper, we first characterize some transferable skills that are shared across diverse tasks by decomposing trajectories into fine-grained components, and derive a set of principles for designing auxiliary training tasks to teach language models these skills.
+Guided by these principles, we propose a training environment, \methodName, consisting of a set of scalable synthetic tasks, such as function localization and dependency search.
+Experiments show that agents trained on our synthetic tasks effectively generalize to diverse real-world tasks that are not present in training, improving a base model by 25.4\% absolute gain on SWE-Bench Verified, 
+7.9\% on SWT-Bench Verified, and 5.1\% on Commit-0 Lite. \methodName also complements datasets built for the downstream tasks (e.g., improving SWE-Play by 4.9\% on SWT-Bench Verified)\footnote{Code available at: https://github.com/yiqingxyq/Hybrid-Gym}.
+\end{abstract}
+
+\begin{figure*}[t]
+\centering
+\vspace{-0.1cm}
+\resizebox{\linewidth}{!}{%
+  \includegraphics{figures/intro.pdf}%
+}
+\caption{(\textit{\textbf{Left}}) We decompose general coding agent tasks into a set of intermediate components and compute the percentage of agent actions spent on each component. Our training tasks partially cover verification and fully cover reasoning, repository exploration, and implementation, which consist of around 68\% of the actions.
+\textit{(\textbf{Right})} Example actions for each component. Compared to a baseline training method, SWE-Gym~\cite{swegym}, training with our \methodName significantly reduces failures due to insufficient reasoning, insufficient exploration, and failed file editing, improving the final resolved rate on SWE-Bench Verified from 20.6\% to 32.4\% 
+}
+\vspace{-0.1cm}
+\label{fig:intro}
+\end{figure*}
+
+\section{Introduction}
+
+Recent advances in large language models have enabled LM-based agents~\citep{sweagent,openhands} to tackle real-world coding tasks, with rapid progress in benchmarks such as the SWE-Bench issue resolution benchmark~\citep{swebench}.
+While most existing methods only focus on the issue-solving task~\citep{swegym,R2EGym,swe-smith}, the application of coding agents can be diverse in real-world usage. A recent study show that more than 70\% of the real-world prompts target other software engineering tasks~\citep{valerie-interaction}.
+
+As shown in a concurrent work~\citep{swe-play}, training on a single task can lead to overfitting and is not sufficient for generalizing to general coding agent tasks.
+In particular, agents trained on issue solving do not transfer reliably to tasks such as test generation or library implementation. This calls for training coding agents with stronger \textbf{task generalization} capabilities.
+Yet, in the current literature, task transferability for coding agents remains underexplored. 
+In this work, we ask: what commonalities do real-world coding tasks share? How can we design training tasks that transfer effectively across a broad range of coding agent tasks?
+
+To answer these questions, we start by decomposing real-world tasks into intermediate components (e.g., reasoning and repo-exploration) and analyzing the model's capabilities on each.
+These results are shown in \autoref{fig:intro}.
+We observe that a large number of actions in successful trajectories are spent on reasoning, repo-exploration, and implementation.
+These categories also remain challenging for current coding agents.
+For instance, even after finetuning on issue-solving~\cite{swegym}, the agent still has file editing failures for the majority of examples.
+
+Fortunately, these intermediate components can be isolated from the construction of coding environments with executable repositories (e.g., with all Python packages required by the repository installed).
+In previous work, setting up executable repositories is often viewed as a prerequisite for constructing training examples. This typically involves a series of complex steps such as package installation and test generation, which is still challenging for agents~\cite{swe-play} and time-consuming for humans~\cite{swegym,swe-smith,R2EGym}.
+Based on the observation from our analysis, we ask: \textbf{can we design a set of tasks that cover the major components for coding practice: reasoning, repo-exploration, and implementation, but do not require executable repository setup?}
+
+
+In this paper, we present \methodName, a large-scale coding agent training dataset containing a suite of coding agent training tasks that only require simple environment setup.
+Based on our analysis summarized in \autoref{fig:intro}, we present a list of principles for training task design: the task needs to 
+(1) match the output format of downstream tasks;
+(2) include a repository exploration process; and 
+(3) require non-trivial reasoning.
+For scalability concerns, we further require that the task (4) must \emph{not} require a complicated environment setup.
+Example tasks include function localization, issue localization, dependency search, and function generation.
+As shown in \autoref{fig:intro}, even without setting up executable repositories, all our tasks cover the major intermediate components of multiple downstream tasks, and such components are achieved with a similar set of actions across tasks. 
+After training on \methodName, the agent has significantly lower failure rates in reasoning, exploration, and file-editing compared to the baseline training method~\cite{swegym}.
+
+
+We conduct experiments on three real-world coding agent tasks: SWE-Bench issue-solving~\citep{swebench}, SWT-Bench test generation~\citep{swt-bench}, and Commit-0 library generation~\citep{commit0}.
+Without training on any of the downstream tasks, \methodName demonstrates strong task transferability on all three tasks, improving Qwen2.5Coder-32B by 25.4\% / 7.9\% / 5.1\% on SWE-Bench Verified / SWT-Bench Verified / Commit-0 Lite, which achieves comparable performance to in-domain datasets (i.e., data built for the downstream tasks). 
+Additionally, we also improve the performance of training on existing in-domain datasets by combining with \methodName (e.g., we improve SWE-Play~\citep{swe-play} by 2.4\% / 4.9\% on SWE-Bench Verified / SWT-Bench Verified).
+
+
+To provide insights to future research on coding agent training, we conduct a series of controlled experiments to reveal what transfers and what does not for coding agents.
+In addition to validating our task design principles that require output format matching, repo-exploration, and non-trivial reasoning, we observe that even successful trajectories of the same set of instances can lead to markedly different impact.
+Repository diversity improves training effectiveness, but training on the same repositories used in evaluation does not inflate performance gains.
+The results emphasize the importance of teacher model selection and data selection.
+
+
+
+
+
+\begin{table*}[t]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{llcccc@{\hspace{4pt}\vrule width 0.6pt\hspace{4pt}}ccc}
+\toprule
+\bf Command & \bf Example & \bf Func-Localize & \bf Issue-Localize & \bf Dep-Search & \bf Func-Gen & \bf SWE-Bench & \bf SWT-Bench & \bf Commit-0 \\
+\midrule
+grep & \texttt{grep -i "pipeline"} & 31.3\% & 36.1\% & 48.4\% & 89.9\% & 35.4\% & 37.4\% & 5.3\% \\
+find & \texttt{find . -type f -name "least\_angle.py"}           & 17.5\% & 11.1\% & 21.4\% & 8.7\%  & 16.2\% & 21.5\% & 31.6\% \\
+cd   & \texttt{cd /workspace/scikit-learn}                       & 21.9\% & 31.5\% & 2.0\%  & 0.0\%  & 26.7\% & 0.0\% & 5.3\% \\
+ls   & \texttt{ls -la}                                           & 6.6\%  & 2.3\%  & 3.7\%  & 0.0\%  & 2.4\%  & 12.4\% & 36.8\% \\
+
+\bottomrule
+\end{tabular}%
+}
+\caption{The use of Linux commands for repository exploration in our proposed training tasks (left) and downstream tasks (right). We show the percentage of each command used in the agent steps targeting repository exploration.
+}
+\vspace{-0.5cm}
+\label{tab:cmd-category}
+\end{table*}
+
+
+
+
+
+
+
+
+\section{\methodName: Constructing Scalable Multitask Coding Agent Training Data}
+\label{sec:methodology}
+In this section, we first guide training task design by analyzing the commonalities shared among coding tasks and agent capabilities (\S\ref{sec:analysis-methodology}).
+Based on the analysis results, we introduce a list of task design principles (\S\ref{sec:principle}) and present the four \methodName tasks that satisfy all the principles (\S\ref{sec:tasks}).
+Finally, we conduct a comparison between our training tasks and real-world coding tasks (\S\ref{sec:task-verification}).
+
+\subsection{Analysis of Coding Agent Task Transferability}
+\label{sec:analysis-methodology}
+With the ultimate goal of designing training tasks that transfer to diverse downstream tasks, we first investigate the commonalities shared by real-world tasks by answering:
+[\textbf{RQ1}] What are the commonalities of the components (i.e., high-level problem-solving steps) to complete real-world coding tasks?
+[\textbf{RQ2}] What are the commonalities of the concrete actions (i.e., commands) taken by the agents?
+Since effective training must target capabilities the agent has not yet learned, we also ask
+[\textbf{RQ3}] What are the abilities that the agent has not learned but are required for task completion?
+
+\start{Analysis Setup}
+Following prior works~\citep{swegym,R2EGym,swe-play}, we adopt the rejection sampling finetuning setting, where we finetune Qwen2.5-Coder-7B/32B on the successful trajectories generated for the training tasks. 
+We conduct the analysis based on 200 successful trajectories sampled from each task, which are generated by Claude-Sonnet-4.5~\cite{claude45} using OpenHands as the agent scaffold~\cite{openhands}
+
+
+\start{Task Analysis: Decomposition of Coding Tasks}
+To answer \textbf{RQ1}, we first decompose general coding agent tasks into five intermediate components: reasoning, repo-exploration, execution of existing code, solution implementation, and verification. 
+We then use o3-mini~\cite{o3_mini} to categorize each agent action by the component it targets.
+We manually examined 20 cases and made the same categorization as o3-mini in all the cases.
+
+Results in \autoref{tab:action-category} show that (1) The action distribution across different components is similar for the three downstream tasks, with repo-exploration accounting for the largest share.
+(2) We notice that around 70\% of the actions fall into categories that do not require setting up executable repositories: reasoning, repo-exploration, and implementation.
+This is notable because executable repository setup is complicated and challenging for both humans and agents~\cite{swe-smith,swe-play} and is the bottleneck of constructing scalable training datasets.
+Our analysis hence suggests a key direction: training tasks that avoid executable repository setup can also be beneficial.
+
+
+\start{Task Analysis: Concrete Actions Used in Coding Tasks}
+To answer \textbf{RQ2}, we analyze the concrete agent tools used in each task. 
+The tools built for the OpenHands agent~\cite{openhands} include bash command execution (\texttt{execute-bash}), file viewing (\texttt{view}), and file editing (\texttt{str-replace}).
+Results in \autoref{tab:action-category} show that all three tools are heavily used across downstream tasks. This suggests that \emph{the agents need to learn all the tools in training.}
+
+For the bash execution tool, we further analyze the specific commands issued by the agent. \autoref{tab:cmd-category} shows that different tasks rely on highly similar repo-exploration commands, such as grep, find, cd, and ls, suggesting that \emph{repo-exploration skills could be broadly transferable across tasks.}
+
+
+\start{Agent Capability Analysis}
+To answer \textbf{RQ3}, under the setting of distillation-based training, we conduct an error analysis for the untrained student model (Qwen2.5Coder-7B, \citet{qwen25coder}), the student model trained on a baseline dataset (SWE-Gym, \citet{swegym}), and the teacher model (Claude-Sonnet-4.5, \citet{claude45}).
+We define error categories along two axes: (1) failures in the intermediate components identified in our previous analysis, and (2) failures in the use of each tool.
+We then prompt an LLM to label whether each agent trajectory exhibits these failures.
+
+
+\autoref{fig:error-analysis} presents the error analysis results.
+We observe several error categories where the fine-tuned model’s failure rate remains far higher than the teacher model’s: insufficient repo-exploration, insufficient reasoning, and failure/loop on the file-editing tool.
+This suggests that \emph{these capabilities still have substantial room for improvement.}
+
+
+
+
+
+\subsection{Principles for Training Task Design}
+\label{sec:principle}
+We summarize the analysis results in \S\ref{sec:analysis-methodology} as follows:
+(1) reasoning, repo-exploration, and implementation are the dominant intermediate components shared across coding-agent tasks;
+(2) The concrete types of commands to complete these components are also similar across tasks; and
+(3) The performance gaps between the student and teacher models are still large for the above categories and file editing.
+
+Based on the task commonalities and the agents' capabilities, we present the following principles for training task design:
+
+\quad [\textbf{Principle 1}] The tasks should have the same output format as the downstream tasks.
+For the downstream tasks in our evaluation, the format is generating a code patch in the codebase, which requires file editing.
+A counterexample for training tasks is a variant of our issue-localization task, where we only need the agent to generate the plan to resolve the issue in the message, without making any code changes.
+
+\quad [\textbf{Principle 2}] The tasks should involve a meaningful repository-exploration phase. 
+A counterexample is a script-level code generation task (e.g., HumanEval~\cite{codex}). 
+Although we can still provide a repository as context by putting the solution template file inside an empty repository, it does not involve any file localization.
+
+\quad [\textbf{Principle 3}] The tasks should require a non-trivial level of reasoning to complete. Namely, the agent must make substantive decisions, such as choosing the problem-solving strategy, generating the precise tool call arguments, and writing the code.
+A counterexample is a simple string-replacement task where we provide the exact edit location and the old/new strings. The agent can succeed by a single \texttt{str-replace} call without inspecting the codebase.
+
+
+With the observation that all the major components: reasoning, exploration, and implementation, do not require an executable repository, we further require the training tasks to be scalable (i.e., easy to generate new instances):
+
+\quad [\textbf{Principle 4}] The task setup should not require substantial effort. For instance, the task should avoid installing packages for the entire repository or generating executable test files, which are challenging for both humans and agents.
+
+In \S\ref{sec:exp}, we will show that all \methodName tasks satisfy all four principles and generalize well to multiple downstream tasks.
+In contrast, \S\ref{sec:controlled-exp} will show that all three counterexample tasks mentioned above do not yield effective task transfer.
+
+
+\begin{table*}[t]
+\centering
+\vspace{-0.15cm}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+\multirow{2}{*}{\bf Model} &
+\multicolumn{2}{c}{\bf Func-Localize} &
+\multicolumn{2}{c}{\bf Issue-Localize} &
+\multicolumn{2}{c}{\bf Dep-Search} &
+\multicolumn{2}{c}{\bf Func-Gen} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+& Success \% & Non-Empty \% & Success \% & Non-Empty \% & Success \% & Non-Empty \% & Success \% & Non-Empty \% \\
+\midrule
+Qwen2.5Coder-7B   & 0.0\%  & 50.0\% & 3.3\%  & 16.7\% & 6.7\%  & 60.0\%  & 5.0\%  & 70.0\% \\
+Qwen2.5Coder-32B  & 40.0\% & 95.0\% & 33.3\% & 83.3\% & 56.7\% & 86.7\%  & 25.0\% & 95.0\% \\
+\midrule
+Claude-Sonnet-4.5        & 70.0\% & 100.0\% & 63.3\% & 100.0\% & 80.0\% & 100.0\% & 50.0\% & 100.0\% \\
+\bottomrule
+\end{tabular}%
+
+}
+\caption{Performance of the student and teacher models on a subset of instances sampled from each training task.}
+\vspace{-0.5cm}
+\label{tab:distillation-sanity-check}
+\end{table*}
+
+
+\subsection{\methodName Tasks}
+\label{sec:tasks}
+
+In this section, we introduce four \methodName tasks that satisfy all the principles above. We provide the prompt for each task in Appendix \ref{app:data-construction}.
+
+\start{Function Localization}
+To boost repository exploration (principle 2), we design a task to localize a function in the entire codebase:
+given a short description, the agent needs to identify the corresponding function in the codebase.
+To satisfy Principle 1, which requires generating a code patch as the outcome, we require the agent to write a docstring containing the fix plan. 
+We evaluate the task by checking whether a docstring is added for the correct function.
+This task requires substantial reasoning (principle 3), as the agent needs to understand the code content and conduct an effective and targeted search over the entire repository, which contains 2,925 functions on average in our training set.
+
+\start{Issue Localization}
+Function localization aims to locate the code based on the description, and issue localization locates the problematic code based on an issue.
+Given a GitHub issue, the task is to locate the relevant code in the repository and leave a comment containing a plan to fix the issue.
+We evaluate the task by checking whether a comment is generated in the same file where the actual fix is located. 
+
+Compared to the issue-solving task used in most prior work, constructing issue localization data does not need test execution for evaluation and can be instantiated from arbitrary GitHub issues.
+However, it still requires reasoning effort on analyzing the issue, exploring the repository, planning the fix, and making successful file-editing actions.
+
+\start{Dependency Search}
+We have the third task that targets code localization, which requires file-editing, repo-exploration, and reasoning: given a function, the agent must identify all functions or classes it directly calls.
+Similar to the above two tasks, we require adding comments to all these dependent modules.
+To obtain the ground truth, we adopt \texttt{Jedi}, a static Python analysis tool, to resolve imported names to their defining modules.
+Solving this task requires the agent to locate the target function, extract the referenced names, resolve each name to the correct module, and successfully edit the relevant files.
+This is non-trivial because a codebase may contain multiple modules with the same name, and only one corresponds to the actual call.
+
+\start{Function Generation}
+Beyond the localization tasks that only aim to generate comments, we design the function generation task that requires actual code generation. 
+Given a function in a codebase, we use an LLM to generate a description of its functionality.
+Then we remove the function body and ask the agent to re-implement it.
+To evaluate the implementation with test cases while avoiding repository installation, we adapt the RepoST~\cite{repost} method to the coding agent setting, which extracts the target function and its dependencies to a separate script and generates tests.
+
+Here we highlight that generating \emph{executable test scripts} is substantially easier and more cost-efficient than setting up \emph{executable repositories}.
+To execute the test script, we only need to install the packages needed by the extracted function and its dependencies (2.1 packages on average), while installing the entire repository requires 26.5 packages on average.
+Furthermore, compared to \emph{generating a new test file} that requires understanding the repository structure and resolving relative imports, it is substantially easier to \emph{produce tests for a separate script}, which only requires seq-to-seq generation, without any agentic frameworks, making the setup process cost-efficient.
+
+We emphasize that \methodName is not limited to the specific tasks introduced here: other task designs may also satisfy our principles.
+It is also possible to construct variants of our tasks, such as localizing multiple functions, or finding the empty function before generating the function body. We leave the exploration to future works. 
+
+
+\begin{figure*}[t]
+\centering
+
+\begin{minipage}[t]{0.6\textwidth}
+  \vspace{0pt} %
+  \centering
+  \resizebox{0.9\linewidth}{!}{%
+    \begin{tabular}{lccccc}
+      \toprule
+      \bf Dataset & \bf \# Trajs & \bf \# Repos & \bf Avg Steps & \bf \# Images & \bf Cost \\
+      \midrule
+      SWE-Gym   & 491   & 11  & 40.2 & 2.4k & unknown \\
+      R2E-Gym   & 3,321 & 10  & 33.2 & 4.5k & unknown \\
+      SWE-Smith & 5,016 & 128 & 26.7 & 128  & 2.32\textcent \\
+      SWE-Play  & 704   & 28  & 72.9 & 28   & unknown \\
+      \midrule
+      \methodName & 4,470 & 762 & 39.1 & 2 & 0.07\textcent \\
+      \hdashline
+      \quad Func-Localize  & 1,438 & 226 & 29.0 & 1 & 0.02\textcent \\
+      \quad Issue-Localize & 1,978 & 263 & 52.4 & 1 & 0.00\textcent \\
+      \quad Dep-Search     & 502   & 120 & 26.9 & 1 & 0.00\textcent \\
+      \quad Func-Gen       & 552 & 306 & 28.6 & 1 & 0.56\textcent \\
+      \bottomrule
+    \end{tabular}%
+  }
+  \captionof{table}{Statistics of \methodName and its subsets.
+  Following SWE-Smith, we report the average per-instance cost of setting up the training environment for rollout.
+  Compared to existing datasets, \methodName covers more repositories and requires only 2 docker images to build all training instances.}
+  \label{tab:stat}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.35\textwidth}
+  \vspace{0pt} %
+  \vspace{-0.1cm}
+  \centering
+  \includegraphics[width=0.9\linewidth]{figures/fig_scaling_law_v2.pdf}
+  \vspace{-0.15cm}
+  \captionof{figure}{Scaling law analysis. Performance on SWE-bench Verified improves consistently as training data size increases from around 5\% (250 trajectories) to 100\% (4.4k trajectories).}
+  \label{fig:scaling}
+\end{minipage}
+\vspace{-0.2cm}
+\end{figure*}
+
+
+\subsection{Verification of \methodName Tasks}
+\label{sec:task-verification}
+In this section, we verify that our training tasks share commonalities with real-world tasks and remain challenging for the student models we use: Qwen2.5Coder 7B and 32B.
+
+\start{\methodName tasks cover the majority of intermediate components in multiple real-world tasks}
+As shown in \autoref{tab:action-category}, all the training tasks cover reasoning, repo-exploration, and implementation, and the function-generation task additionally includes solution verification.
+We note that although our training tasks do not explicitly include executing existing code, it typically accounts for only a small fraction of an agent's trajectory.
+
+\start{\methodName trajectories contain similar actions with real-world tasks}
+As shown in \autoref{tab:cmd-category}, the training tasks use a similar set of bash commands for repo-exploration as the real-world coding tasks.
+Similarly, \autoref{tab:openhands-tool-distribution} shows that the training tasks cover the full set of OpenHands tools used in downstream tasks.
+Together, these results suggest that both the high-level problem-solving components and the concrete actions that achieve them can transfer across \methodName tasks and downstream tasks.
+
+
+\start{\methodName tasks are still challenging for models without finetuning}
+Under the setting of distillation learning, a training task is useful only if there is a performance gap between the student and teacher models
+As a sanity check, before generating training data, we sample 20-30 instances from each task and evaluate the teacher model (Claude-4.5) and student models (Qwen2.5Coder, 7B and 32B).
+
+\autoref{tab:distillation-sanity-check} show that Claude-4.5 achieves substantially higher success rates than Qwen2.5Coder-32B on all four tasks, with gaps ranging from 23.3\% to 30.0\%. This confirms that all tasks provide sufficient room for effective distillation.
+
+
+
+
+
+
+
+\section{Experimental Results}
+\label{sec:exp}
+
+\subsection{Experimental Setup}
+\start{Statistics of \methodName}
+\autoref{tab:stat} presents the statistics of \methodName and existing datasets. 
+Based on the scalable training tasks, we collect 4.4k trajectories from 762 repositories using only two Docker images.
+The environment construction cost is only 0.07\textcent per example, which is 16× lower than SWE-Smith~\cite{swe-smith}.
+Trajectory lengths vary by task, ranging from 26.9 to 52.4 agent steps, which are comparable to the issue-solving trajectories in prior datasets, suggesting that our tasks retain a meaningful level of complexity.
+The trajectories are obtained from the combination of Claude-Sonnet-4.5~\cite{claude45}, Claude-Sonnet-3.7~\cite{claude37}, and Qwen3-235b~\cite{qwen3}.
+We provide dataset details in Appendix~\ref{app:data-construction}.
+
+
+\begin{table*}[t]
+\centering
+
+
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{c@{\hspace{2pt}}c@{\hspace{2pt}}c@{\hspace{2pt}}c l ccc cc c}
+\toprule
+\multicolumn{4}{c}{ \multirow{2}{*}{\bf Training Tasks} } &
+\multirow{2}{*}{\bf Training Dataset} 
+& \multicolumn{3}{c}{Issue Solving (swe)} 
+& \multicolumn{2}{c}{Test Generation (swt)} 
+& \multicolumn{1}{c}{Library Build (cmt)}\\
+& & & &
+& \multicolumn{3}{c}{\bf SWE-bench Verified} 
+& \multicolumn{2}{c}{\bf SWT-Bench Lite \& Verified} 
+& \multicolumn{1}{c}{\bf Commit-0 Lite} \\
+\cmidrule(lr){1-4}
+\cmidrule(lr){6-8}\cmidrule(lr){9-10}\cmidrule(lr){11-11}
+swe & swt & cmt & syn
+& & Resolved \% & Localized \% & Non-Loop \%
+& Lite Resolved & Verified Resolved
+& Resolved \% \\
+\midrule
+
+\sdlrow & \multicolumn{10}{c}{\textit{Base Model: Qwen2.5Coder-7B}} \\
+& & & 
+& (\textit{base}) Qwen2.5Coder-7B    & 1.8  & 4.4 & 60.4 & 0.72 & 0.23 & 4.80 \\
+
+& & & \cmark
+& SWE-Play-general & 8.6~{\textcolor{treegreen}{+6.8}} & 49.2~{\textcolor{treegreen}{+44.8}} & 93.4~{\textcolor{treegreen}{+33.0}} & 2.54~{\textcolor{treegreen}{+1.82}} & 1.62~{\textcolor{treegreen}{+1.39}} & 9.25~{\textcolor{treegreen}{+4.45}} \\
+
+\cmark & & &
+& SWE-Gym          & \dlcell 10.6~{\textcolor{treegreen}{+8.8}}  & \dlcell 48.2~{\textcolor{treegreen}{+43.8}} & \dlcell 79.0~{\textcolor{treegreen}{+18.6}} & 1.45~{\textcolor{treegreen}{+0.73}} & 0.69~{\textcolor{treegreen}{+0.46}}  & 8.61~{\textcolor{treegreen}{+3.81}} \\
+
+\cmark & & &
+& R2E-Gym          & \dlcell \bf 19.0~{\textcolor{treegreen}{+17.2}} & \dlcell \textemdash & \dlcell \textemdash  & 0.72~{\textcolor{gray}{+0.00}}      & 0.46~{\textcolor{treegreen}{+0.23}}  & 9.25~{\textcolor{treegreen}{+4.45}} \\
+
+\cmark & & &
+& SWE-smith        & \dlcell 15.2~{\textcolor{treegreen}{+13.4}} & \dlcell \textemdash & \dlcell \textemdash  & 0.00~{\textcolor{red}{-0.72}}     & 0.00~{\textcolor{red}{-0.23}} & 9.32~{\textcolor{treegreen}{+4.52}} \\
+
+\cmark & \cmark & \cmark & \cmark
+& SWE-Play & \dlcell 17.0~{\textcolor{treegreen}{+15.2}} & \dlcell 60.4~{\textcolor{treegreen}{+56.0}} & \dlcell 91.2~{\textcolor{treegreen}{+30.8}} & \dlcell 3.26~{\textcolor{treegreen}{+2.54}} & \dlcell 3.00~{\textcolor{treegreen}{+2.77}} & \dlcell 10.42~{\textcolor{treegreen}{+5.62}} \\
+\midrule
+
+& & & \cmark
+& \textbf{\methodName}      & 15.0~{\textcolor{treegreen}{+13.2}} & \bf 62.4~{\textcolor{treegreen}{+58.0}} & \bf 97.6~{\textcolor{treegreen}{+37.2}} & 2.90~{\textcolor{treegreen}{+2.18}} & 2.54~{\textcolor{treegreen}{+2.31}} & 10.54~{\textcolor{treegreen}{+5.74}} \\
+
+\cmark & \cmark & \cmark & \cmark
+& \textbf{\methodName} + SWE-Play
+& \dlcell 17.6~{\textcolor{treegreen}{+15.8}} & \dlcell 58.6~{\textcolor{treegreen}{+54.2}} & \dlcell 97.2~{\textcolor{treegreen}{+36.8}} & \dlcell \bf 5.07~{\textcolor{treegreen}{+4.35}} & \dlcell \bf 4.39~{\textcolor{treegreen}{+4.16}} & \dlcell \bf 11.02~{\textcolor{treegreen}{+6.22}} \\
+\midrule
+
+\sdlrow & \multicolumn{10}{c}{\textit{Base Model: Qwen2.5Coder-32B}} \\
+& & & 
+& (\textit{base}) Qwen2.5Coder-32B    & 7.0  & 45.6 & 70.6 & 9.42 & 9.01 & 8.34 \\
+
+\cmark & & &
+& SWE-Gym          & \dlcell 20.6~{\textcolor{treegreen}{+13.6}} & \dlcell 57.8~{\textcolor{treegreen}{+12.2}} & \dlcell 76.2~{\textcolor{treegreen}{+5.6}} & 3.26~{\textcolor{red}{-6.16}} & 2.77~{\textcolor{red}{-6.24}} & 9.58~{\textcolor{treegreen}{+1.24}} \\
+
+\cmark & & &
+& R2E-Gym          & \dlcell 34.4~{\textcolor{treegreen}{+27.4}} & \dlcell \textemdash & \dlcell \textemdash & 3.26~{\textcolor{red}{-6.16}} & 4.39~{\textcolor{red}{-4.62}} & 11.56~{\textcolor{treegreen}{+3.22}} \\
+
+\cmark & & &
+& SWE-smith        & \dlcell \bf 40.2~{\textcolor{treegreen}{+33.2}} & \dlcell \textemdash & \dlcell \textemdash & 13.77~{\textcolor{treegreen}{+4.35}} & 10.62~{\textcolor{treegreen}{+1.61}} & 12.38~{\textcolor{treegreen}{+4.04}} \\
+
+\cmark & \cmark & \cmark & \cmark
+& SWE-Play     & \dlcell 31.2~{\textcolor{treegreen}{+24.2}} & \dlcell 73.4~{\textcolor{treegreen}{+27.8}} & \dlcell 85.2~{\textcolor{treegreen}{+14.6}} & \dlcell 18.12~{\textcolor{treegreen}{+8.70}} & \dlcell 16.17~{\textcolor{treegreen}{+7.16}} & \dlcell 13.95~{\textcolor{treegreen}{+5.61}} \\
+\midrule
+
+& & & \cmark
+& \textbf{\methodName}      & 32.4~{\textcolor{treegreen}{+25.4}} & \bf 75.4~{\textcolor{treegreen}{+29.8}} & 98.2~{\textcolor{treegreen}{+27.6}} & 17.03~{\textcolor{treegreen}{+7.61}} & 16.86~{\textcolor{treegreen}{+7.85}} & 13.45~{\textcolor{treegreen}{+5.11}} \\
+
+\cmark & \cmark & \cmark & \cmark
+& \textbf{\methodName} + SWE-Play
+& \dlcell 33.6~{\textcolor{treegreen}{+26.6}} 
+& \dlcell 75.2~{\textcolor{treegreen}{+29.6}} 
+& \dlcell \bf 99.2~{\textcolor{treegreen}{+28.6}} 
+& \dlcell \bf 20.29~{\textcolor{treegreen}{+10.87}}
+& \dlcell \bf 21.02~{\textcolor{treegreen}{+12.01}}
+& \dlcell \bf 15.52~{\textcolor{treegreen}{+7.18}}
+\\
+\bottomrule
+\end{tabular}%
+}
+
+
+\caption{Results on three real-world coding tasks.
+We show whether the datasets contain swe, swt, cmt, or synthetic tasks (syn) in training.
+Results with a white background are \textbf{task transfer} results.
+Results with a light grey background are trained with in-domain tasks.
+We highlight the best result for each dataset and show the relative \textcolor{treegreen}{gain} and \textcolor{red}{loss} compared to the base model, Qwen2.5Coder.
+\methodName achieves strong task transfer performances across all three benchmarks and further improves in-domain datasets (e.g., SWE-Play).
+}
+\vspace{-0.3cm}
+\label{tab:main}
+\end{table*}
+
+
+
+
+
+
+
+
+
+
+\start{Evaluation Datasets and Metrics}
+We follow prior work~\cite{swe-play} and report the resolved rates on SWE-Bench Verified~\cite{swebench}, SWT-Bench Lite/Verified~\cite{swt-bench}, and Commit-0~\cite{commit0}.
+On SWE-Bench, we additionally report the localized rate: the percentage of code patches applied to the correct file, and the non-loop rate: the percentage of trajectories without any ``loops'', which is defined as repeating the same action three times consecutively~\cite{swegym}.
+
+
+
+
+\subsection{Main Results}
+\start{\methodName Shows Strong Task Transfer Performance}
+Results in \autoref{tab:main} show that \methodName delivers strong task generalization performance across all three benchmarks. Relative to the base 32B model, it improves performance by 25.40 \% / 7.85 \% / 5.11 \% on the three tasks, outperforming all existing task transfer training datasets.
+Notably, without training on the downstream tasks, \methodName matches or even exceeds in-domain training. For example, SWE-Play-32B reaches 31.2 \% / 16.17 \% on SWE-Bench Verified / SWT-Bench Verified, whereas \methodName-32B achieves 32.4 \% / 16.86 \%. 
+This suggest that our tasks capture the commonality shared among general coding agent tasks and transfer effectively across all three downstream tasks.
+These results are especially compelling because \methodName requires substantially less effort to build new training instances than prior datasets (e.g., as shown in \autoref{tab:stat}, SWE-Smith requires 128 docker images and costs 2.32\textcent per example, while \methodName is only built with 2 images and an average cost of 0.07\textcent).
+
+
+\start{\methodName Improves In-Domain Training Datasets}
+\autoref{tab:main} further shows that we can further improve in-domain datasets by combining with \methodName. For instance, we improve SWE-Play by 2.40\% / 4.85\% / 1.57\% on SWE-Bench Verified / SWT-Bench Verified / Commit-0 Lite.
+The gains from mixing \methodName with in-domain data suggest that the two sources are complementary. \methodName primarily teaches general agent skills (e.g., reasoning, repo-exploration, and reliable tool use), while in-domain data contributes task-specific behaviors (e.g., generating tests and building libraries from scratch). Combining them both leads to additive improvements.
+
+\begin{table}[t]
+\centering
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{l ccc}
+\toprule
+\bf Training Tasks & \bf SWE-Bench & \bf SWT-Bench & \bf Commit-0 \\
+(\# Instances) & Resolved \% & Resolved \% & Resolved \% \\
+\midrule
+Qwen2.5Coder-7B & 1.8 & 0.23 & 4.80 \\
++ Issue-Solving (491) & \dlcell 10.6~{\scriptsize\textcolor{treegreen}{+8.8}} & 0.69~{\scriptsize\textcolor{treegreen}{+0.46}} & 8.61~{\scriptsize\textcolor{treegreen}{+3.81}} \\
+\midrule
++ Func-Localize (500) & 12.8~{\scriptsize\textcolor{treegreen}{+11.0}} & \bf 3.00~{\scriptsize\textcolor{treegreen}{+2.77}} & 8.74~{\scriptsize\textcolor{treegreen}{+3.94}} \\
++ Issue-Localize (500) & 9.6~{\scriptsize\textcolor{treegreen}{+7.8}} & 2.31~{\scriptsize\textcolor{treegreen}{+2.08}} & 9.09~{\scriptsize\textcolor{treegreen}{+4.29}} \\
++ Dep-Search (500) & 6.4~{\scriptsize\textcolor{treegreen}{+4.6}} & 2.31~{\scriptsize\textcolor{treegreen}{+2.08}} & 9.25~{\scriptsize\textcolor{treegreen}{+4.45}} \\
++ Func-Gen (500) & 7.8~{\scriptsize\textcolor{treegreen}{+6.0}} & 2.54~{\scriptsize\textcolor{treegreen}{+2.31}} & 9.25~{\scriptsize\textcolor{treegreen}{+4.45}} \\
+\hdashline
+\addlinespace[0.5ex]
++ \textbf{\methodName}-full & \bf 15.0~{\scriptsize\textcolor{treegreen}{+13.2}} & 2.54~{\scriptsize\textcolor{treegreen}{+2.31}} & \bf 10.54~{\scriptsize\textcolor{treegreen}{+5.74}} \\
+
+\bottomrule
+\end{tabular}%
+}
+\caption{Performance of training Qwen2.5Coder-7B on each of the \methodName tasks and the issue-solving task. We sample 500 instances from each of our tasks.
+Even without finetuning on issue-solving, function localization achieves a larger performance gain than SWE-Gym, which has 491 issue-solving instances.
+We report the resolved rates on SWE-Bench Verified, SWT-Bench Verified, and Commit-0 Lite. 
+}
+\vspace{-0.5cm}
+\label{tab:single-task}
+\end{table}
+
+
+
+\subsection{Detailed Results}
+
+\start{Training on Individual Tasks}
+To assess the contribution of each task, we sample 500 instances per task and train the model on each subset separately. This training size is comparable to the SWE-Gym issue-solving dataset, which contains 491 examples. As shown in \autoref{tab:single-task}, each task yields a substantial improvement over the base model, with gains ranging from 4.6\% to 11.0\%. The tasks emphasize different capabilities (e.g., function localization performs best on SWE-Bench but worst on Commit-0), while the full \methodName dataset—combining all four tasks—achieves the strongest overall performance.
+
+Notably, at similar training scales, the function-localization and issue-localization tasks provide gains that are comparable to, or even exceed, in-domain training. For example, SWE-Gym achieves a 10.6\% resolved rate and a 48.2\% localized rate, whereas Func-Localize (500) reaches 12.8\% and 53.6\%. A possible explanation is that localization trajectories devote more steps to repo-exploration than issue-solving, which is one of the agent’s primary bottlenecks.
+
+
+
+
+\start{Scaling Law Analysis}
+As shown in \autoref{fig:scaling}, we train the 32B model on progressively larger subsets of \methodName, where we proportionally sample training instances from each task. 
+The performance continues to improve as the dataset grows and still shows improvements when we have 4.4k training trajectories.
+The results suggest the advantage of constructing highly scalable training datasets.
+
+
+
+
+
+
+
+
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_combined_bcde.pdf}
+\vspace{-0.6cm}
+\caption{Controlled experiments on training data characteristics.
+(a)~\textbf{Output Format:} Removing the file editing actions (\texttt{str\_replace}) from function localization trajectories causes a large drop in SWE-bench resolution rate.
+(b)~\textbf{Repo-Exploration:} script-level code generation (LCB) does not effectively transfer to repo-level issue-solving and even underperforms documentation generation, a simple repo-level task.
+(c)~\textbf{Task Complexity:} Transfer improves as training tasks become more complex.
+(d)~\textbf{Trajectory Complexity:} With a fixed data size, training on longer (more agent steps) trajectories substantially improves downstream performance.}
+\vspace{-0.3cm}
+\label{fig:ablation}
+\end{figure*}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Analysis: on the Task Transferability of Coding Agent Training}
+\label{sec:controlled-exp}
+
+We have established in \S\ref{sec:exp} that the particular tasks included in \methodName are effective for task generalization across diverse real-world coding benchmarks. 
+In this section, we investigate: \textbf{what properties of these trajectories enable task transfer?}
+To answer this, we run controlled ablations that systematically modify trajectory structure and measure the resulting changes in performance.
+
+As the ablations require repeated evaluation across many variations, we keep the analyses computationally tractable by evaluating on an easier subset of SWE-bench examples (denoted as ``Easy 50''), which are solvable by Deepseek-v3, a strong reference model \cite{deepseekv3}. 
+
+
+
+\subsection{Output Format Must Match Downstream Tasks}
+While our tasks are designed around higher level tasks such as function localization and generation, we also find that \textit{how} these behaviors are expressed in the training trajectories matters. Specifically, as stated in [\textbf{Principle 1}] in \S\ref{sec:methodology}, we find that the output format of the tasks is a crucial factor.
+
+All three downstream tasks in our experiments require the agent to generate a code patch as the output. To isolate the role of output format, we conduct a minimal ablation on our function localization task: instead of requiring the model to generate a comment in the codebase containing the fix plan, we simply ask it to generate the plan in a message.
+We accordingly modify the training trajectories by removing the \texttt{str\_replace} actions for writing comments and adding the fix plan in the final message generated by the agent.
+
+
+As shown in \autoref{fig:ablation}, performance on SWE-bench collapses when we remove the string replacement actions. These results suggest that for coding agent tasks, the production of \textbf{patch-like outputs} is not a superficial formatting choice but a crucial skill that the agent needs to learn. 
+
+
+\subsection{Script-level Agentic Tasks Do NOT Generalize to Repo-level Tasks}
+\label{sec:ablation_lcb}
+We then validate [\textbf{Principle 2}], which requires the training tasks to have a repo-exploration stage. 
+To test this, we implement a script-level task, LiveCodeBench (LCB) \cite{livecodebench}, which primarily evaluates function generation in a single file. 
+We contrast it with two repo-level tasks: 
+(1) the repo-level function generation task we use in \methodName (introduced in \S\ref{sec:methodology}), and 
+(2) documentation generation, which requires the agent to generate the docstring for a given function.
+For fair comparison, we wrap the coding template and test script in LCB in a dummy repository so that the model interacts with the same harness and tool API. 
+
+\autoref{fig:ablation} shows that despite having the wrapper to make LCB superficially a repo-level task, LCB is not effective for transfer to SWE-bench. 
+This negative result suggests that repository-level generalization requires more than superficial ``agentic formatting.'' 
+In particular, repo-level tasks induce behaviors that are largely absent from script-level problems: identifying and navigating relevant files, grounding edits in existing codebase structure, and producing concrete patch-like modifications that apply cleanly in context. 
+
+
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_sampling_teacher_combined.pdf}
+\caption{Effect of teacher model and data selection. (a) Effect of \textbf{sampling strategy} at fixed training budget. Repository diversity improves training but using the same repositories as in evaluation does not. 
+(b) training on issue localization trajectories with different \textbf{teacher models}. o3-mini (edited) indicates the same set of trajectories as o3-mini, but with text and action steps combined. 
+}
+\vspace{-0.3cm}
+\label{fig:sampling_teacher}
+\end{figure}
+
+\subsection{Task and Trajectory Complexity Matters}
+\label{sec:ablation_complexity}
+After identifying reasoning and planning as a crucial component in coding tasks in \S\ref{sec:methodology}, we derive [\textbf{Principle 3}] that requires the task to involve a non-trivial level of reasoning.
+Here, we examine whether task generalizability improves as training supervision more closely matches the multi-step, tool-mediated interaction patterns required for coding tasks. 
+
+We first examine tasks with ascending complexity: (1) single-shot string-replacement edits in which the task is to refactor a function by simply renaming it without replacing other usages of it, (2) documentation generation for a fixed function (as in $\S\ref{sec:ablation_lcb}$), and (3) the function localization task, which requires more complex reasoning than the previous two tasks.
+We see in \autoref{fig:ablation} that as tasks become more complex and interaction-heavy, downstream SWE-bench performance improves, and models are substantially more likely to produce non-empty patches.
+
+
+To isolate complexity effects from task identity, we also investigate the effect of \emph{trajectory complexity}, which is operationalized as the number of agent actions (tool calls and intermediate components) taken in successful trajectories.
+We pool trajectories from our repo-level task mixture and partition them by length, selecting the shortest and longest quartiles (25\% each). 
+As shown in \autoref{fig:ablation}, although the training sizes are the same, training on longer trajectories yields a large improvement in SWE-bench resolution rate, alongside a sharp reduction in empty generations. These results suggest that trajectory complexity is an important driver of task performance.
+
+
+
+\subsection{Even Successful Trajectories of the Same Task Instances may have Different Impact}
+In addition to training task design, we observe that \textbf{the teacher model also plays a crucial role in effective training}.
+Specifically, we find that even successful trajectories for the same instances can yield very different distillation outcomes.
+We illustrate a particular case in \autoref{fig:sampling_teacher}. 
+On the issue localization task, we found that distilling from Qwen3-235B and Claude trajectories transfers well to SWE-Bench, but distilling from o3-mini trajectories degrades student performance. 
+The key difference we found is that o3-mini frequently separates reasoning and actions (i.e., tool calls) into different turns.
+After training on such data, the agent collapses to the distribution of thinking-only conversational turns and does not learn to call tools at all.
+We edit o3-mini trajectories by simply stitching adjacent rationale and action steps into a single example. The resulting data effectively transfers to SWE-Bench, indicating that model-specific behaviors such as separating reasoning and actions can strongly influence the effectiveness of distillation.
+
+
+\subsection{Sampling Strategies Affects Effectiveness}
+Finally, beyond task choice and trajectory structure, we also find that how training instances are sampled impacts downstream transfer. 
+We examine two key factors: 
+(1) repository diversity (i.e., the number of repositories covered by the training set), which is identified by previous works~\cite{repost,swe-smith}, and 
+(2) the domain of code. In the extreme case, we build training data from the exact same repositories we use in evaluation.
+
+To investigate this, we keep the training budget fixed at 500 trajectories and sample from function localization trajectories. We compare:
+(i) \emph{Min Repo-Diversity}, where we aggregate instances from a small number of large repositories (7 repositories), 
+(ii) \emph{Max Repo-Diversity}, where we sample one instance per repository (500 repositories) to maximize repository coverage, and 
+(iii) \emph{In-Domain Repos}, where we construct function localization trajectories based on the 12 SWE-Bench repositories.
+
+Despite using the same number of training instances and the same SFT recipe, \emph{Max Repo-Diversity} yields higher SWE-bench resolution (\autoref{fig:sampling_teacher}). 
+This suggests that exposure to a broader range of repository structures improves generalization to unseen repositories.
+Surprisingly, \textbf{training on the same repositories in evaluation does not improve the performance}, suggesting that learning general agent skills is more crucial than memorizing repo-specific information.
+
+
+
+
+\section{Related Work}
+\start{Coding Agents}
+Compared to traditional seq-to-seq code generation~\cite{codex} or static pipelines~\cite{agentless,swe-search}, coding agents can dynamically call tools to interact with the environment, enabling end-to-end problem solving.
+Recent works develop various coding agent scaffolds, including SWE-Agent~\cite{sweagent}, Live-SWE-agent~\citep{live-swe-agent} and OpenHands~\cite{openhands}
+Such agentic methods achieve strong performance on diverse coding benchmarks, including issue-solving~\cite{swebench} under various settings~\citep{swebench,swebench-pro,swebench-multimodal,multi-swe-bench}, test generation~\cite{swt-bench,testgeneval}, and feature construction~\cite{commit0,repocoder,R2E,codebenchgen,kernelbench}.
+We therefore focus on improving agent systems for coding tasks.
+
+\start{Coding Agent Pre-training}
+In the pre-training stage, recent work train the language models on general agentic tasks, including proprietary models~\cite{gpt5,claude45} and open-sourced ones~\cite{qwen3,deepseekv3}.
+For instance, Kimi-K2~\cite{kimik2} constructs a wide range of synthetic tools and tasks to boost general agentic abilities.
+In this work, we focus on synthetic tasks for coding agents.
+
+\start{Coding Agent Post-training}
+In the post-training stage, one line of work focuses on the training method, such as rejection sampling~\cite{swegym} and reinforcement learning~\cite{swerl,rlcoder,mlagent}.
+Another line of work improves training data construction, yet most prior datasets only cover a single task such as issue-solving~\cite{swegym,swefixer,swegpt,R2EGym,swe-smith}, neglecting other crucial applications, including test generation and library construction.
+A concurrent work, SWE-Play~\cite{swe-play}, designs training data for each of the downstream tasks and additionally presents agent-proposed tasks. 
+However, they do not conduct in-depth analysis on task transferability and fully rely on the agent to set up the complicated training environments, including building and installing a repository from scratch, which is challenging and limits the scalability.
+In contrast, we conduct systematic analyses on what transfers and what does not for coding tasks and design scalable and cost-efficient tasks based on analysis results.
+
+
+
+\section{Conclusion and Future Works}
+We conduct in-depth analyses of the transferability across coding agent tasks.
+We find that there are similar components shared by diverse real-world coding tasks (e.g., repo-exploration) that can be achieved by the agent with similar commands.
+Based on the discovery, we derive a set of principles for task design, including output format matching, requiring repo-exploration, non-trivial reasoning, and simple setup.
+We present four scalable and cost-efficient tasks that do not require setting up executable repositories.
+With the resulting dataset, \methodName, we achieve strong task generalization results on three real-world benchmarks. For instance, even without issue-solving or test-generation data in training, we improve Qwen2.5Coder-32B by 25.4\% on SWE-Bench Verified and 7.9\% on SWT-Bench Verified.
+We also improve existing in-domain datasets by combining them with \methodName (e.g., improving SWE-Play by 4.9\% on SWT-Bench Verified).
+
+We propose two future directions:
+(1) \textbf{Exploration of training tasks}. As mentioned in \S\ref{sec:methodology}, other training tasks may also satisfy our design principles. For example, a code execution task, verified by whether a function is successfully called with no execution error, or an environment setup task, which is evaluated by comparing the installed package versions with the setup file.
+One can also make the current \methodName tasks more challenging (e.g., also ask the agent to locate the function before implementing the function body).
+(2) \textbf{Analysis of trajectory effectiveness}. We present in \S\ref{sec:controlled-exp} that even successful trajectories of the same task instances may have substantially different impact in training. We use \autoref{fig:sampling_teacher} as an example. We encourage future researchers to explore the exact characteristics of a trajectory that are beneficial or harmful for training, and to improve the effectiveness of the trajectories for cost-efficient training.
+
+\section{Acknowledgement}
+We thank Andre He, Abhav Mehrotra, Zora Zhiruo Wang, Pranjal Aggarwal, Jing Yu Koh, Saujas Vaduguru, Atharva Naik, Yuning Mao, Xuhui Zhou, and Tim Dettmers for their helpful feedback on this work.
+This work was supported in part by NSF grant DSES 2222762.  EL was supported by the National Sciences and Engineering Research Council of Canada (NSERC), [funding reference number 578085], as well as the SoftBank-ARM Fellowship.
+
+
+
+\section*{Impact Statement}
+This paper presents work whose goal is to advance the field of Machine Learning, with an emphasis on improving the generalization of coding agents across diverse software engineering tasks, supporting more transferable automated programming systems and improved software maintenance. The potential societal impacts of this work are consistent with those of prior research on machine learning–based coding agents. We do not identify any ethical concerns or broader societal consequences that would otherwise require specific discussion.
+
+
+\bibliography{reference}
+\bibliographystyle{icml2026}
+
+\newpage
+\appendix
+\onecolumn
+\section{Appendix}
+
+
+\subsection{Dataset Construction Details}
+\label{app:data-construction}
+
+\subsubsection{Function Localization}
+
+\start{Task}
+Given a natural language description (without quick identifiers like names or paths) of a function , the agent must search the codebase to locate the target and add a docstring for it.
+
+\start{Task Implementation}
+Similar to issue localization, we build the tasks based on the SWE-Gym-Raw dataset~\citep{swegym}. 
+We extract all the functions (including standalone functions and class methods) from the 358 repositories and sample 2,000 of them.
+For each target, we use GPT-4o-mini~\cite{gpt4o_mini} to generate a brief description while explicitly avoiding mentioning the function name, file path, or other identifiers.
+
+To initialize the environment for the agent, we run each instance in a base \texttt{Python-3.11} Docker container.
+We clone the repository at the specified commit and remove the target function's docstring.
+
+The agent receives only the functionality description within our prompt shown below:
+\begin{tcolorbox}[colback=gray!5!white,colframe=gray!75!black,title=Function Localization Prompt,fontupper=\small\ttfamily,breakable]
+I've uploaded a python code repository in \{workspace\_dir\}.\\
+Your goal is to locate the \{module\_type\} described below and write its docstring.\\
+\\
+<function\_description>\\
+\{brief\_description\}\\
+</function\_description>\\
+\\
+Known details:\\
+- Target type: \{function|class\}\\
+- The original docstring was removed; please restore/author it.\\
+- Note: The target name is not provided. You must identify the correct \{module\_type\} based on the functionality description above.\\
+\\
+Follow these steps:\\
+1. EXPLORATION: Search the codebase to find matching functions.\\
+2. UNDERSTANDING: Read the implementation to understand arguments, return values, and side effects.\\
+3. RECHECK: Verify the located function matches the description.\\
+4. GENERATION: Insert a Python docstring using triple quotes.\\
+5. REVIEW: Check formatting and accuracy.
+\end{tcolorbox}
+
+\start{Evaluation}
+We extract the git diff to parse which and how the files and functions were edited. Success requires: (1) the correct target function is edited, and (2) all changes made to the repository are docstrings/comments only.
+
+\start{Training Instance Rollout}
+We use both Claude-sonnet-3.7 and Qwen3-235B-A22B-Instruct-2507 to generate trajectories and only keep the successful ones in our training set.
+We started from 2,300 SWE-Gym-Raw functions and finally obtained 1,438 function-localization instances.
+
+
+\subsubsection{Issue Localization}
+
+\start{Task}
+Given a GitHub issue description, the agent must (1) identify files, classes, functions, and lines of code which are relevant to resolving the issue, and (2) generate comments at the corresponding locations that contain the plan to resolve the issue. The agent should only generate comments and should not modify any actual code.
+
+\start{Task Implementation}
+To implement the task, we use the SWE-Gym-Raw dataset~\citep{swegym} as the input of our data, which contains 64,689 GitHub issues sampled from 358 open-source Python projects and the gold patches to resolve them.
+We use the files that the gold patches locate in as the ground truth locations.
+
+When applying the agents to resolve the tsak, we run each instance in a fresh `python-3.11` Docker container, with the repository cloned at the corresponding commit. Note that we do not install external packages for the repositories, so only one docker is required for generating all the issue-localization instances.
+
+Below is the prompt provided to the agent:
+
+\begin{tcolorbox}[colback=gray!5!white,colframe=gray!75!black,title=Issue Localization Prompt,fontupper=\small\ttfamily,breakable]
+Consider the following issue description:\\
+<issue\_description>\\
+\{problem\_statement\}\\
+</issue\_description>\\
+\\
+Your objective is to localize the specific files, classes or functions, and lines of code that need modification or contain key information to resolve the issue.\\
+\\
+Follow these steps:\\
+1. Categorize and Extract Key Problem Information\\
+2. Locate Referenced Modules (use format: file\_path:QualifiedName)\\
+3. Analyze and Reproduce the Problem\\
+4. Locate Areas for Modification\\
+\\
+Output Format: List locations in triple backticks with file path, class, function, and line numbers. Include about 5 files.\\
+\\
+IMPORTANT: You should NOT modify any files!
+\end{tcolorbox}
+
+
+\start{Evaluation}
+We extract localization predictions from the code patches generated by the agent and check whether they cover the file where the ground truth patch locates in.
+
+\start{Training Instance Rollout}
+We use the combination of Claude-Sonnet-4.5 and Claude-Sonnet-3.7 to generate trajectories and only keep the successful ones in our training set.
+We started from 3,000 SWE-Gym-Raw issues and finally obtained 1,978 issue-localization instances.
+
+\subsubsection{Dependency Search}
+\start{Task}
+Given a function in a codebase, the agent must identify all functions or classes that it directly calls and add comments to the corresponding module definitions. The agent should only add comments and should not modify any actual code.
+
+\start{Task Implementation}
+We build the tasks based on the SWE-Gym-Raw dataset~\citep{swegym}. 
+For each unique repository and commit, we parse all Python files and locate candidate target functions.
+We use an AST-based pass to extract call sites from the function body, and use \texttt{Jedi}, a static Python
+analysis tool, to resolve each call to its actual definition across files by following import chains.
+We filter out Python built-ins and external packages, and only keep dependencies defined within the repository.
+We then sample target functions with 1--3 direct dependencies (configurable) and use a balanced sampling scheme across dependency counts, with a cap per repository, to create the dataset.
+
+To initialize the environment for the agent, we run each instance in a base \texttt{Python-3.11} Docker container.
+We clone the repository at the specified commit.
+
+Below is the prompt provided to the agent:
+\begin{tcolorbox}[colback=gray!5!white,colframe=gray!75!black,title=Dependency Search Prompt,fontupper=\small\ttfamily,breakable]
+I've uploaded a python code repository in \{workspace\_dir\}.\\
+Your task is to analyze the function `\{func\_name\}` located at line \{line\_number\} in `\{file\_path\}` and find ALL modules (functions or classes) that are directly called by this function within this repository.\\
+\\
+For each called module that is defined within this repository (not Python built-ins or external libraries), you need to add a comment right above its definition:\\
+`\# this function/class is called by the \{func\_name\} function`\\
+\\
+What counts as a "call":\\
+- Function calls: `helper\_function()`\\
+- Class instantiation: `MyClass()`\\
+- Exception raising: `raise MyException()`\\
+\\
+Follow these rules:\\
+1. Only annotate modules that are directly called by `\{func\_name\}` (not transitive dependencies).\\
+2. Only annotate modules defined within this repository; ignore Python built-ins, standard library functions, and external package functions.\\
+3. Place the comment on the line immediately above the `def` or `class` keyword.\\
+4. If there are decorators, place the comment above the decorators.\\
+5. Do NOT modify any code other than adding these comments.\\
+6. The comment must say exactly: `\# this function/class is called by the \{func\_name\} function`.\\
+7. Do NOT add duplicate comments; each dependency should be annotated exactly once.\\
+\\
+Follow these steps:\\
+1. READ: First, read the function `\{func\_name\}` in `\{file\_path\}` to understand what it does.\\
+2. ANALYZE: Identify all function/class calls within the function body (typically 1--3 dependencies).\\
+3. RESOLVE EACH CALL: For each call, determine which definition is actually in scope by checking local definitions and imports.\\
+4. FILTER: Exclude Python built-ins and external library calls.\\
+5. ANNOTATE: Add the comment above each qualifying definition in the repository.\\
+6. VERIFY: Double-check that all comments are correctly placed and there are no duplicates.
+\end{tcolorbox}
+
+\start{Evaluation}
+We parse the git diff to identify added comments and match them to the expected dependency definitions.
+A dependency is counted as correct if a comment that mentions the target function is placed above the dependency definition (within a small line-offset tolerance).
+Success requires: (1) all dependencies are annotated, (2) no extra or duplicate comments are added, and (3) all changes are comments only.
+
+\start{Training Instance Rollout}
+We use Qwen3-235B-A22B-Instruct-2507 to generate the trajectories and only keep the correct ones in our training set. We started from the SWE-Gym-Raw repositories and finally obtained 4,000 dependency-search instances.
+We sampled 800 instances for rollout and finally obtained 502 successful trajectories for training.
+
+
+\subsubsection{Function Generation}
+\start{Task}
+Given a function's signature and docstring (with the body removed), the agent must implement the complete function body.
+
+\start{Task Implementation}
+We build the tasks from the RepoST dataset~\citep{repost}, which contains 7,415 Python functions that have executable test cases across 1,049 repositories. For each instance, the function body is replaced with \texttt{pass \# TODO: Implement this function}, preserving the signature and docstring.
+
+Each instance runs in a Docker container with the repository at the corresponding commit. The target function would be masked properly before applying the agent to solve the task.
+
+Below is the prompt we use:
+\begin{tcolorbox}[colback=gray!5!white,colframe=gray!75!black,title=Function Generation Prompt,fontupper=\small\ttfamily,breakable]
+I've uploaded a python code repository in \{workspace\_dir\}.\\
+Your task is to implement the body of the function `\{func\_name\}` in `\{file\_path\}`.\\
+\\
+The function signature and docstring are already in the file. The body has been replaced with `pass  \# TODO: Implement this function`.\\
+\\
+<function\_info>\\
+- File: \{file\_path\}\\
+- Function: \{func\_name\}\\
+- Docstring: \{docstring\}\\
+</function\_info>\\
+\\
+Follow these steps:\\
+1. NAVIGATE: Open the file and locate the function.\\
+2. CONTEXT: Read surrounding code for imports, patterns, and style.\\
+3. IMPLEMENT: Replace the placeholder with a complete implementation.\\
+4. VERIFY: Review for correctness and style.
+\end{tcolorbox}
+
+\start{Evaluation}
+We extract the implemented function body from the code patch generated by the agent, rename it to \texttt{\$\{func\_name\}\_new\_implementation}, and execute RepoST's test harness to validate correctness.
+RepoST provides an evaluation script for each instance, which contains a test function that compares the output of the agent's implementation with the output of the original function.
+We execute all the evaluation scripts in the docker environment they provide.
+Note that all the scripts are executed in a single docker.
+
+\start{Training Instance Rollout}
+We use both Claude-Sonnet-3.7 and Qwen3-235B-A22B-Instruct-2507 to generate trajectories and only keep the successful ones in our training set.
+We started from 2,000 RepoST instances and finally obtained 1,287 function-localization instances.
+
+
+
+
+\newpage
+\subsection{Detailed Analysis Results}
+\label{app:detailed-analysis-results}
+
+\autoref{tab:action-category} shows the detailed numbers from \autoref{fig:intro}: the percentage of agent steps spent on each component in diverse coding agent tasks.
+
+\autoref{fig:error-analysis} shows the error analysis results of the base student model (Qwen2.5Coder-7B), the model finetuned on issue-solving (SWE-Gym-7B), the model finetuned on our synthetic tasks (i.e., under the task transfer setting) (\methodName-7B), and the teacher model (Claude-Sonnet-3.7). We show the results on SWE-Bench Verified (Easy 50).
+
+\begin{table*}[t]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccc@{\hspace{4pt}\vrule width 0.6pt\hspace{4pt}}ccc}
+\toprule
+\bf Category & \bf Func-Localize & \bf Issue-Localize & \bf Dep-Search & \bf Func-Gen & \bf SWE-Bench & \bf SWT-Bench & \bf Commit-0 \\
+\midrule
+Analysis and reasoning        & 1.6\%  & 9.3\%  & 6.3\%  & 0.9\%  & 6.0\%  & 11.4\% & 1.3\% \\
+Repository exploration        & 77.9\% & 66.2\% & 55.5\% & 44.6\% & 49.1\% & 40.3\% & 27.3\% \\
+Execution of existing code    & 0.1\%  & 0.3\%  & 0.1\%  & 0.2\%  & 4.7\%  & 6.3\%  & 3.7\% \\
+Solution implementation       & 17.4\% & 23.9\% & 35.3\% & 45.3\% & 12.7\% & 16.2\% & 53.8\% \\
+Solution verification         & 3.0\%  & 0.3\%  & 2.8\%  & 9.0\%  & 27.6\% & 25.9\% & 10.9\% \\
+\bottomrule
+\end{tabular}%
+
+}
+\caption{We categorize the agent's actions based on the intermediate components of the task, where the categories are pre-defined. 
+}
+\label{tab:action-category}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\resizebox{\linewidth}{!}{%
+  \includegraphics{figures/error_analysis.pdf}%
+}
+\caption{The error analysis of different methods on 50 instances sampled from SWE-Bench Verified.}
+\label{fig:error-analysis}
+\end{figure}
+
+
+\begin{table}[t]
+\centering
+\resizebox{0.5\linewidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+\bf Dataset & \texttt{execute-bash} & \texttt{view} & \texttt{str-replace} \\
+\midrule
+Func-Localize  & 5.55  & 4.43 & 1.16 \\
+Issue-Localize & 9.37  & 7.76 & 5.15 \\
+Dep-Search     & 1.78  & 3.12 & 1.89 \\
+Func-Gen       & 0.53  & 1.75 & 1.47 \\
+\midrule
+SWE-Bench      & 10.65 & 6.88 & 3.65 \\
+SWT-Bench      & 16.54 & 6.09 & 5.16 \\
+Commit-0       & 18.40 & 21.20 & 36.40 \\
+\bottomrule
+\end{tabular}%
+}
+\caption{The average number of OpenHands tools called in each trajectory.}
+\label{tab:openhands-tool-distribution}
+\end{table}
+
+
+\subsection{Experimental Details}
+\label{app:exp-details}
+
+\subsubsection{Agent Framework}
+We use the OpenHands framework~\cite{openhands}, which provides a sandboxed Docker environment where agents execute bash commands and file operations through a CodeAct interface. For each instance: (1) a Docker container is initialized with the repository at the specified commit, (2) task-specific preprocessing is applied (e.g., removing docstrings or masking function bodies), (3) the agent interacts with the environment, and (4) changes are captured as a git diff.
+
+
+\subsubsection{Training Details}
+To train 7B models, we use 8 A6000 GPUs and search hyper-paramers in the range of learning-rate=\{5e-5, 1e-4\}, num-epochs=\{3,5\}, and batch-size=\{8,16\}.
+The Qwen2.5Coder-7B-Instruct + \methodName and Qwen2.5Coder-7B-Instruct + \methodName + SWE-Play results we report in \autoref{tab:main} are both trained with learning-rate=5e-5, num-epochs=5, and batch-size=8.
+To train Qwen2.5Coder-32B-Instruct, we use 2 H100 GPUs. Due to computational constraints, we use learning-rate=5e-5, num-epochs=5, and batch-size=16 for all the models.
+
+
+\end{document}
